@@ -1,76 +1,98 @@
 ﻿using Newtonsoft.Json;
 using System.Globalization;
+using System.Net;
 using System.Text;
 using TelegramWeatherBot;
 
 const string telegramToken = "token";
 const string weatherKey = "key";
-const string offsetFile = "offset.txt";
-
-if (!File.Exists(offsetFile))
-{
-    File.Create(offsetFile).Close();
-    File.WriteAllText(offsetFile, "0");
-}
 
 var client = new HttpClient();
-var offset = int.Parse(File.ReadAllText(offsetFile));
+var offset = 0;
 
 while (true)
 {
-    var jsonResponse = client.GetAsync($"https://api.telegram.org/bot{telegramToken}/getUpdates").Result;
+    var jsonResponse = client.GetAsync($"https://api.telegram.org/bot{telegramToken}/getUpdates?offset={offset}").Result;
     var tgUpdates = JsonConvert.DeserializeObject<UpdatesResponse>(jsonResponse.Content.ReadAsStringAsync().Result);
 
-    if (!jsonResponse.IsSuccessStatusCode || tgUpdates == null)
+    if (jsonResponse.IsSuccessStatusCode && tgUpdates != null)
     {
-        Console.WriteLine(DateTime.Now.ToString(CultureInfo.InvariantCulture) + ": Telegram error");
-    }
-    else
-    {
-        for (var i = offset; i < tgUpdates.Result.Length; i++)
+        foreach (var update in tgUpdates.Result)
         {
-            var update = tgUpdates.Result[i];
-            var city = update.Message.Text;
-            jsonResponse = client.GetAsync($"http://api.openweathermap.org/data/2.5/weather?q={city}&APPID={weatherKey}&units=metric&lang=ru").Result;
-            var weather = JsonConvert.DeserializeObject<NowWeatherModel>(jsonResponse.Content.ReadAsStringAsync().Result);
+            var messageText = update.Message.Text.ToLower();
+            string responseMessage;
 
-            if (!jsonResponse.IsSuccessStatusCode || weather == null)
+            if (messageText == "/start")
             {
-                Console.WriteLine(DateTime.Now.ToString(CultureInfo.InvariantCulture) + ": Weather error");
+                responseMessage = "Этот бот показывает погоду для любой точки мира! Чтобы узнать погоду, введите название города";
+            }
+            else if (messageText == "/weather")
+            {
+                responseMessage = "Чтобы узнать погоду, введите название города";
             }
             else
             {
-                await client.GetAsync($"https://api.telegram.org" +
-                                $"/bot{telegramToken}" +
-                                $"/sendMessage" +
-                                $"?chat_id={update.Message.Chat.Id}&text={BuildMessage(weather)}");
+                if (messageText.StartsWith("/weather"))
+                {
+                    messageText = messageText[8..].Trim();
+                }
+                jsonResponse = client.GetAsync($"http://api.openweathermap.org/data/2.5/weather?q={messageText}&APPID={weatherKey}&units=metric&lang=ru").Result;
+
+                if (!jsonResponse.IsSuccessStatusCode)
+                {
+                    switch (jsonResponse.StatusCode)
+                    {
+                        case HttpStatusCode.NotFound:
+                            responseMessage = $"Город {messageText} не найден";
+                            break;
+                        case HttpStatusCode.Unauthorized:
+                            responseMessage = "Сервис перегружен, попробуйте снова через несколько минут. " +
+                                      "Если проблема не решена, свяжитесь с разработчиком @ice_z";
+                            Console.WriteLine(DateTime.Now.ToString(CultureInfo.InvariantCulture) + ": Превышено количество запросов в минуту или устарел API ключ погоды");
+                            break;
+                        default:
+                            responseMessage = "Неизвестная ошибка, свяжитесь с разработчиком @ice_z";
+                            Console.WriteLine(DateTime.Now.ToString(CultureInfo.InvariantCulture) + "Неизвестная ошибка!");
+                            break;
+                    }
+                }
+                else
+                {
+                    var weather = JsonConvert.DeserializeObject<NowWeatherModel>(jsonResponse.Content.ReadAsStringAsync().Result);
+                    responseMessage = BuildMessage(weather!);
+                }
             }
+            await client.GetAsync($"https://api.telegram.org" +
+                            $"/bot{telegramToken}" +
+                            $"/sendMessage" +
+                            $"?chat_id={update.Message.Chat.Id}&text={responseMessage}");
         }
-
-        if (offset != tgUpdates.Result.Length)
+        if (tgUpdates.Result.Length != 0)
         {
-            offset = tgUpdates.Result.Length;
-            File.WriteAllText(offsetFile, offset.ToString());
+            offset = tgUpdates.Result[^1].UpdateId + 1;
         }
-
     }
+    else
+    {
+        Console.WriteLine(DateTime.Now.ToString(CultureInfo.InvariantCulture) + ": Ошибка связи с Телеграм");
+    }
+
     Thread.Sleep(2000);
 }
 
 static string BuildMessage(NowWeatherModel weather)
 {
     var message = new StringBuilder();
-
     var windDirection = weather.Wind.Deg switch
     {
         >= 0 and < 15 or >= 345 and < 360 => "с",
-        >= 15 and < 75 => "св",
-        >= 75 and < 105 => "в",
-        >= 105 and < 165 => "юв",
-        >= 165 and < 195 => "ю",
-        >= 195 and < 255 => "юз",
-        >= 255 and < 285 => "з",
-        >= 285 and < 345 => "сз",
+        >= 15 and < 75 => "северо-восток",
+        >= 75 and < 105 => "восток",
+        >= 105 and < 165 => "юго-восток",
+        >= 165 and < 195 => "юг",
+        >= 195 and < 255 => "юго-запад",
+        >= 255 and < 285 => "запад",
+        >= 285 and < 345 => "северо-запад",
         _ => string.Empty
     };
 
